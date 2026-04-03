@@ -2,7 +2,9 @@
 (require racket/gui racket/draw)
 
 ;; ── Configuration ──────────────────────────────────────────
-(define CELL-SIZE 6)          ; pixels per cell side
+(define CELL-SIZE 6)          ; pixels per cell side (mutable for zoom)
+(define MIN-CELL-SIZE 1)
+(define MAX-CELL-SIZE 24)
 (define current-rule 30)      ; Wolfram rule (0–255), mutable
 (define current-color-mode 0) ; cycles through palettes
 (define SCROLL-INTERVAL 50)   ; ms between scroll steps (~20 fps)
@@ -187,9 +189,10 @@
 
 (define (update-title!)
   (send frame set-label
-        (format "Rule ~a  |  ~a~a"
+        (format "Rule ~a  |  ~a  |  Zoom ~ax~a"
                 current-rule
                 (vector-ref color-mode-names current-color-mode)
+                CELL-SIZE
                 (if scrolling? "" "  [PAUSED]"))))
 
 (define (set-rule! n)
@@ -211,6 +214,17 @@
       (draw-row-to-bitmap! (vector-ref row-buffer r) (* r CELL-SIZE)))
     (set! needs-full-redraw? #f))
   (update-title!))
+
+;; Zoom: change cell size and reinit everything
+(define (zoom! delta)
+  (define new-size (max MIN-CELL-SIZE (min MAX-CELL-SIZE (+ CELL-SIZE delta))))
+  (when (not (= new-size CELL-SIZE))
+    (set! CELL-SIZE new-size)
+    ;; Force reinit on next paint by clearing buffer
+    (set! row-buffer #f)
+    (set! offscreen #f)
+    (set! offscreen-dc #f)
+    (update-title!)))
 
 ;; Custom canvas with keyboard handling
 (define automaton-canvas%
@@ -240,6 +254,14 @@
         [(eq? key #\space)
          (set! scrolling? (not scrolling?))
          (update-title!)]
+        ;; Zoom in: + or =
+        [(or (eq? key #\+) (eq? key #\=))
+         (zoom! 1)
+         (send this refresh)]
+        ;; Zoom out: -
+        [(eq? key #\-)
+         (zoom! -1)
+         (send this refresh)]
         [else (void)]))))
 
 (define (paint-canvas canvas dc)
