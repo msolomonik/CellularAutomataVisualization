@@ -4,45 +4,79 @@
 ;; ── Configuration ──────────────────────────────────────────
 (define CELL-SIZE 6)          ; pixels per cell side
 (define current-rule 30)      ; Wolfram rule (0–255), mutable
-(define current-color-mode 0) ; 0 = black/white, 1 = state colors
-(define NUM-COLOR-MODES 2)
+(define current-color-mode 0) ; cycles through palettes
 (define SCROLL-INTERVAL 50)   ; ms between scroll steps (~20 fps)
 
 ;; ── Color palettes ─────────────────────────────────────────
-(define palette-bw
-  (vector (make-color   0   0   0)
-          (make-color   0   0   0)
-          (make-color   0   0   0)
-          (make-color   0   0   0)
-          (make-color   0   0   0)
-          (make-color   0   0   0)
-          (make-color   0   0   0)
-          (make-color   0   0   0)))
+;; Each palette maps neighbourhood index 0–7 to a color for alive cells.
 
-(define palette-state
-  (vector (make-color  30  30  30)    ; 0 (000)
-          (make-color  29 145 192)    ; 1 (001) teal
-          (make-color 127  72 163)    ; 2 (010) purple
-          (make-color  44 162  95)    ; 3 (011) green
-          (make-color 227  74  51)    ; 4 (100) red-orange
-          (make-color 253 187  45)    ; 5 (101) gold
-          (make-color  70 130 180)    ; 6 (110) steel blue
-          (make-color 231  41 138)))  ; 7 (111) hot pink
+(define palette-bw          ; 0: Classic black & white
+  (vector (make-color   0   0   0) (make-color   0   0   0)
+          (make-color   0   0   0) (make-color   0   0   0)
+          (make-color   0   0   0) (make-color   0   0   0)
+          (make-color   0   0   0) (make-color   0   0   0)))
 
-(define palettes (vector palette-bw palette-state))
-(define color-mode-names (vector "Black & White" "State Colors"))
+(define palette-vivid       ; 1: Vivid state colors
+  (vector (make-color  30  30  30) (make-color  29 145 192)
+          (make-color 127  72 163) (make-color  44 162  95)
+          (make-color 227  74  51) (make-color 253 187  45)
+          (make-color  70 130 180) (make-color 231  41 138)))
+
+(define palette-ocean       ; 2: Ocean blues & greens
+  (vector (make-color   8  29  88) (make-color  37  52 148)
+          (make-color  34  94 168) (make-color  29 145 192)
+          (make-color  65 182 196) (make-color 127 205 187)
+          (make-color 199 233 180) (make-color 237 248 177)))
+
+(define palette-fire        ; 3: Fire – dark red to bright yellow
+  (vector (make-color  60   0   0) (make-color 128   0  10)
+          (make-color 180  18   0) (make-color 215  48   5)
+          (make-color 245 100   0) (make-color 253 170  20)
+          (make-color 254 217  80) (make-color 255 255 178)))
+
+(define palette-neon        ; 4: Neon on dark
+  (vector (make-color  20  20  20) (make-color   0 255 136)
+          (make-color 255  20 147) (make-color   0 191 255)
+          (make-color 255 255   0) (make-color 138  43 226)
+          (make-color   0 255 255) (make-color 255 105  80)))
+
+(define palette-earth       ; 5: Earth tones
+  (vector (make-color  60  40  20) (make-color 120  72  36)
+          (make-color 168 120  60) (make-color 192 156  96)
+          (make-color 120 144  72) (make-color  72 132  84)
+          (make-color 192 180 144) (make-color 228 216 180)))
+
+(define palette-synthwave   ; 6: Synthwave / retrowave
+  (vector (make-color  10   3  40) (make-color  72  15 115)
+          (make-color 162  30 132) (make-color 228  60  92)
+          (make-color 255 130  80) (make-color 255 200 100)
+          (make-color  30 180 230) (make-color 100 220 255)))
+
+(define palette-pastel      ; 7: Soft pastels
+  (vector (make-color 180 180 180) (make-color 255 179 186)
+          (make-color 255 223 186) (make-color 255 255 186)
+          (make-color 186 255 201) (make-color 186 225 255)
+          (make-color 218 186 255) (make-color 255 186 243)))
+
+(define palettes
+  (vector palette-bw palette-vivid palette-ocean palette-fire
+          palette-neon palette-earth palette-synthwave palette-pastel))
+
+(define color-mode-names
+  (vector "Black & White" "Vivid" "Ocean" "Fire"
+          "Neon" "Earth" "Synthwave" "Pastel"))
+
+(define NUM-COLOR-MODES (vector-length palettes))
 
 (define (current-palette)
   (vector-ref palettes current-color-mode))
 
 ;; Pre-built brushes for each palette (avoids creating objects every frame)
-(define brushes-bw
-  (for/vector ([c (in-vector palette-bw)])
-    (new brush% [color c] [style 'solid])))
-(define brushes-state
-  (for/vector ([c (in-vector palette-state)])
-    (new brush% [color c] [style 'solid])))
-(define brush-sets (vector brushes-bw brushes-state))
+(define brush-sets
+  (for/vector ([pal (in-vector palettes)])
+    (for/vector ([c (in-vector pal)])
+      (new brush% [color c] [style 'solid]))))
+
 (define (current-brushes)
   (vector-ref brush-sets current-color-mode))
 
