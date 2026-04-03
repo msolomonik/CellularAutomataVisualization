@@ -3,62 +3,61 @@
 
 ;; ── Configuration ──────────────────────────────────────────
 (define CELL-SIZE 6)          ; pixels per cell side
-(define GRID-WIDTH 200)       ; number of cells per row
-(define current-rule 5)       ; Wolfram rule (0–255), mutable
+(define current-rule 30)      ; Wolfram rule (0–255), mutable
 (define current-color-mode 0) ; 0 = black/white, 1 = state colors
 (define NUM-COLOR-MODES 2)
+(define SCROLL-INTERVAL 50)   ; ms between scroll steps (~20 fps)
 
 ;; ── Color palettes ─────────────────────────────────────────
-;; Each palette maps neighbourhood index 0–7 to a color for "alive" cells.
-;; Dead cells (rule says off) use the background color.
-
-;; Palette 0: classic black & white (alive = black regardless of state)
 (define palette-bw
-  (vector (make-color   0   0   0)    ; 0 → black
-          (make-color   0   0   0)    ; 1 → black
-          (make-color   0   0   0)    ; 2 → black
-          (make-color   0   0   0)    ; 3 → black
-          (make-color   0   0   0)    ; 4 → black
-          (make-color   0   0   0)    ; 5 → black
-          (make-color   0   0   0)    ; 6 → black
-          (make-color   0   0   0)))  ; 7 → black
+  (vector (make-color   0   0   0)
+          (make-color   0   0   0)
+          (make-color   0   0   0)
+          (make-color   0   0   0)
+          (make-color   0   0   0)
+          (make-color   0   0   0)
+          (make-color   0   0   0)
+          (make-color   0   0   0)))
 
-;; Palette 1: vivid state colours — each of the 8 neighbourhood
-;; configurations gets its own colour.
 (define palette-state
-  (vector (make-color  30  30  30)    ; 0 (000) → near-black
-          (make-color  29 145 192)    ; 1 (001) → teal
-          (make-color 127  72 163)    ; 2 (010) → purple
-          (make-color  44 162  95)    ; 3 (011) → green
-          (make-color 227  74  51)    ; 4 (100) → red-orange
-          (make-color 253 187  45)    ; 5 (101) → gold
-          (make-color  70 130 180)    ; 6 (110) → steel blue
-          (make-color 231  41 138)))  ; 7 (111) → hot pink
+  (vector (make-color  30  30  30)    ; 0 (000)
+          (make-color  29 145 192)    ; 1 (001) teal
+          (make-color 127  72 163)    ; 2 (010) purple
+          (make-color  44 162  95)    ; 3 (011) green
+          (make-color 227  74  51)    ; 4 (100) red-orange
+          (make-color 253 187  45)    ; 5 (101) gold
+          (make-color  70 130 180)    ; 6 (110) steel blue
+          (make-color 231  41 138)))  ; 7 (111) hot pink
 
 (define palettes (vector palette-bw palette-state))
+(define color-mode-names (vector "Black & White" "State Colors"))
 
 (define (current-palette)
   (vector-ref palettes current-color-mode))
 
-(define color-mode-names
-  (vector "Black & White" "State Colors"))
+;; Pre-built brushes for each palette (avoids creating objects every frame)
+(define brushes-bw
+  (for/vector ([c (in-vector palette-bw)])
+    (new brush% [color c] [style 'solid])))
+(define brushes-state
+  (for/vector ([c (in-vector palette-state)])
+    (new brush% [color c] [style 'solid])))
+(define brush-sets (vector brushes-bw brushes-state))
+(define (current-brushes)
+  (vector-ref brush-sets current-color-mode))
+
+(define bg-brush (new brush% [color (make-color 255 255 255)] [style 'solid]))
+(define no-pen (new pen% [style 'transparent]))
 
 ;; ── Rule logic ─────────────────────────────────────────────
-;; Convert rule number to an 8-bit vector of outcomes.
-;; Index = 3-bit neighbourhood (left, center, right) as a number 0–7.
 (define (make-rule-table n)
   (for/vector ([i (in-range 8)])
     (bitwise-bit-set? n i)))
 
 (define rule-table (make-rule-table current-rule))
 
-;; Each cell stores its neighbourhood index (0–7) if alive, or #f if dead.
-;; This lets us colour by the pattern that produced the cell.
-
-;; cell-alive? : check if a cell value counts as alive
 (define (cell-alive? v) (and v #t))
 
-;; Given a row of cell-values (#f or 0–7), produce the next row.
 (define (next-generation row)
   (define len (vector-length row))
   (for/vector ([i (in-range len)])
@@ -66,115 +65,182 @@
            [c (cell-alive? (vector-ref row i))]
            [r (cell-alive? (if (< i (- len 1)) (vector-ref row (+ i 1)) #f))]
            [idx (+ (if l 4 0) (if c 2 0) (if r 1 0))])
-      (if (vector-ref rule-table idx)
-          idx    ; alive — store which neighbourhood produced it
-          #f)))) ; dead
+      (if (vector-ref rule-table idx) idx #f))))
 
-;; ── Build all generations ──────────────────────────────────
-;; Start with a single live cell in the centre (state 2 = "010").
 (define (make-initial-row width)
   (define row (make-vector width #f))
-  (vector-set! row (quotient width 2) 2)  ; centre cell alive, state 2
+  (vector-set! row (quotient width 2) 2)
   row)
 
-(define (build-generations width num-rows)
-  (define gens (make-vector num-rows))
-  (vector-set! gens 0 (make-initial-row width))
-  (for ([g (in-range 1 num-rows)])
-    (vector-set! gens g (next-generation (vector-ref gens (- g 1)))))
-  gens)
+;; ── Scrolling state & offscreen bitmap ─────────────────────
+(define row-buffer #f)   ; vector of row-vectors
+(define buf-cols 0)
+(define buf-rows 0)
+(define scrolling? #t)
+(define offscreen #f)    ; bitmap for double-buffering
+(define offscreen-dc #f) ; drawing context for the bitmap
+(define needs-full-redraw? #t)
+
+;; Draw a single row onto the offscreen bitmap at pixel-row y
+(define (draw-row-to-bitmap! row-data screen-y)
+  (define brushes (current-brushes))
+  (define cols (vector-length row-data))
+  ;; clear this row to white
+  (send offscreen-dc set-brush bg-brush)
+  (send offscreen-dc draw-rectangle 0 screen-y (* cols CELL-SIZE) CELL-SIZE)
+  ;; draw alive cells
+  (for ([c (in-range cols)])
+    (define v (vector-ref row-data c))
+    (when v
+      (send offscreen-dc set-brush (vector-ref brushes v))
+      (send offscreen-dc draw-rectangle
+            (* c CELL-SIZE) screen-y CELL-SIZE CELL-SIZE))))
+
+;; Fill buffer from scratch with seed + generations, redraw bitmap fully
+(define (init-buffer! cols rows)
+  (set! buf-cols cols)
+  (set! buf-rows rows)
+  (define buf (make-vector rows #f))
+  (vector-set! buf 0 (make-initial-row cols))
+  (for ([g (in-range 1 rows)])
+    (vector-set! buf g (next-generation (vector-ref buf (- g 1)))))
+  (set! row-buffer buf)
+  ;; Create/resize offscreen bitmap
+  (define pw (* cols CELL-SIZE))
+  (define ph (* rows CELL-SIZE))
+  (set! offscreen (make-bitmap pw ph))
+  (set! offscreen-dc (new bitmap-dc% [bitmap offscreen]))
+  (send offscreen-dc set-pen no-pen)
+  (send offscreen-dc set-smoothing 'unsmoothed)
+  ;; Draw all rows
+  (send offscreen-dc set-background (make-color 255 255 255))
+  (send offscreen-dc clear)
+  (for ([r (in-range rows)])
+    (draw-row-to-bitmap! (vector-ref buf r) (* r CELL-SIZE)))
+  (set! needs-full-redraw? #f))
+
+;; Scroll: shift bitmap up by CELL-SIZE pixels, compute + draw only the new row
+(define (scroll-step!)
+  (when (and row-buffer offscreen-dc (> buf-rows 1))
+    ;; Shift the row-buffer
+    (for ([i (in-range (- buf-rows 1))])
+      (vector-set! row-buffer i (vector-ref row-buffer (+ i 1))))
+    (define new-row (next-generation (vector-ref row-buffer (- buf-rows 2))))
+    (vector-set! row-buffer (- buf-rows 1) new-row)
+    ;; Shift bitmap pixels up by CELL-SIZE
+    (define pw (send offscreen get-width))
+    (define ph (send offscreen get-height))
+    (send offscreen-dc draw-bitmap-section
+          offscreen 0 0   ; dest x,y
+          0 CELL-SIZE      ; src x,y
+          pw (- ph CELL-SIZE))  ; src w,h
+    ;; Clear and draw the new bottom row
+    (draw-row-to-bitmap! new-row (* (- buf-rows 1) CELL-SIZE))))
 
 ;; ── GUI ────────────────────────────────────────────────────
-(define frame
-  (new frame%
-       [label (format "Rule ~a  |  ~a" current-rule
-                      (vector-ref color-mode-names current-color-mode))]
-       [width  (* CELL-SIZE GRID-WIDTH)]
-       [height (* CELL-SIZE GRID-WIDTH)]
-       [style '(fullscreen-button)]))   ; adds the OS fullscreen button
+;; Custom frame that actually exits the process on close
+(define app-frame%
+  (class frame%
+    (super-new)
+    (define/augment (on-close)
+      (exit 0))))
 
-(define generations #f)  ; computed once we know the canvas size
+(define frame
+  (new app-frame%
+       [label "Cellular Automata"]
+       [width 1200]
+       [height 800]))
 
 (define (update-title!)
   (send frame set-label
-        (format "Rule ~a  |  ~a"
+        (format "Rule ~a  |  ~a~a"
                 current-rule
-                (vector-ref color-mode-names current-color-mode))))
+                (vector-ref color-mode-names current-color-mode)
+                (if scrolling? "" "  [PAUSED]"))))
 
 (define (set-rule! n)
   (set! current-rule (modulo n 256))
   (set! rule-table (make-rule-table current-rule))
+  (when (and (> buf-cols 0) (> buf-rows 0))
+    (init-buffer! buf-cols buf-rows))
   (update-title!))
 
 (define (cycle-color-mode! dir)
   (set! current-color-mode
         (modulo (+ current-color-mode dir) NUM-COLOR-MODES))
+  ;; Need to redraw bitmap with new colors
+  (set! needs-full-redraw? #t)
+  (when (and (> buf-cols 0) (> buf-rows 0) offscreen-dc)
+    (send offscreen-dc set-background (make-color 255 255 255))
+    (send offscreen-dc clear)
+    (for ([r (in-range buf-rows)])
+      (draw-row-to-bitmap! (vector-ref row-buffer r) (* r CELL-SIZE)))
+    (set! needs-full-redraw? #f))
   (update-title!))
 
-;; Custom canvas that handles keyboard input
+;; Custom canvas with keyboard handling
 (define automaton-canvas%
   (class canvas%
     (super-new)
     (define/override (on-char event)
       (define key (send event get-key-code))
       (cond
-        ;; Right arrow → next rule
         [(eq? key 'right)
          (set-rule! (+ current-rule 1))
          (send this refresh)]
-        ;; Left arrow → previous rule
         [(eq? key 'left)
          (set-rule! (- current-rule 1))
          (send this refresh)]
-        ;; Up arrow → next color mode
         [(eq? key 'up)
          (cycle-color-mode! 1)
          (send this refresh)]
-        ;; Down arrow → previous color mode
         [(eq? key 'down)
          (cycle-color-mode! -1)
          (send this refresh)]
-        ;; Page Up → jump forward 10 rules
         [(eq? key 'prior)
          (set-rule! (+ current-rule 10))
          (send this refresh)]
-        ;; Page Down → jump back 10 rules
         [(eq? key 'next)
          (set-rule! (- current-rule 10))
          (send this refresh)]
+        [(eq? key #\space)
+         (set! scrolling? (not scrolling?))
+         (update-title!)]
         [else (void)]))))
+
+(define (paint-canvas canvas dc)
+  (define-values (cw ch) (send canvas get-client-size))
+  (define cols (max 1 (quotient cw CELL-SIZE)))
+  (define rows (max 1 (quotient ch CELL-SIZE)))
+
+  ;; Init buffer on first paint or resize
+  (when (or (not row-buffer)
+            (not (= cols buf-cols))
+            (not (= rows buf-rows)))
+    (init-buffer! cols rows))
+
+  ;; Just blit the offscreen bitmap — fast!
+  (when offscreen
+    (send dc draw-bitmap offscreen 0 0)))
 
 (define automaton-canvas
   (new automaton-canvas%
        [parent frame]
        [style '(no-autoclear)]
-       [paint-callback
-        (λ (canvas dc)
-          ;; Compute generations to fill the visible area
-          (define-values (cw ch) (send canvas get-client-size))
-          (define cols (quotient cw CELL-SIZE))
-          (define rows (quotient ch CELL-SIZE))
-          (set! generations (build-generations cols rows))
+       [paint-callback paint-canvas]))
 
-          ;; Clear background
-          (send dc set-background (make-color 255 255 255))
-          (send dc clear)
+;; ── Scroll timer ───────────────────────────────────────────
+(define scroll-timer
+  (new timer%
+       [notify-callback
+        (lambda ()
+          (when scrolling?
+            (scroll-step!)
+            (send automaton-canvas refresh)))]
+       [interval SCROLL-INTERVAL]))
 
-          ;; Draw each cell
-          (define pal (current-palette))
-          (send dc set-pen "black" 0 'transparent)
-          (for* ([r (in-range rows)]
-                 [c (in-range cols)])
-            (let ([v (vector-ref (vector-ref generations r) c)])
-              (when v
-                (send dc set-brush (vector-ref pal v) 'solid)
-                (send dc draw-rectangle
-                      (* c CELL-SIZE) (* r CELL-SIZE)
-                      CELL-SIZE CELL-SIZE)))))]))
-
-;; Make sure canvas gets keyboard focus
-(send automaton-canvas focus)
-
-;; Show the window and enter the event loop
-(send frame maximize #t)   ; start maximised
+;; ── Launch ─────────────────────────────────────────────────
 (send frame show #t)
+(send frame maximize #t)
+(send automaton-canvas focus)
+(update-title!)
